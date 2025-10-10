@@ -441,7 +441,150 @@ func TestCollection_ListIDs(t *testing.T) {
 	}
 }
 
-func TestCollection_Get(t *testing.T) {
+// TestCollection_ListDocuments verifies that ListDocuments returns all documents
+// and that the returned documents are deep copies (mutating them must not affect
+// the collection’s internal state).
+func TestCollection_ListDocuments(t *testing.T) {
+	ctx := context.Background()
+
+	// Create collection
+	db := NewDB()
+	name := "test"
+	metadata := map[string]string{"foo": "bar"}
+	vectors := []float32{-0.40824828, 0.40824828, 0.81649655} // normalized version of `{-0.1, 0.1, 0.2}`
+	embeddingFunc := func(_ context.Context, _ string) ([]float32, error) {
+		return vectors, nil
+	}
+	c, err := db.CreateCollection(name, metadata, embeddingFunc)
+	if err != nil {
+		t.Fatal("expected no error, got", err)
+	}
+	if c == nil {
+		t.Fatal("expected collection, got nil")
+	}
+
+	// Add two documents (one with explicit embedding, one relying on embeddingFunc).
+	docs := []Document{
+		{ID: "1", Metadata: map[string]string{"foo": "bar"}, Embedding: vectors, Content: "hello"},
+		{ID: "2", Metadata: map[string]string{"baz": "qux"}, Content: "world"},
+	}
+	for _, d := range docs {
+		if err := c.AddDocument(ctx, d); err != nil {
+			t.Fatalf("unexpected error adding document %q: %v", d.ID, err)
+		}
+	}
+
+	got, err := c.ListDocuments(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error from ListDocuments: %v", err)
+	}
+	if len(got) != len(docs) {
+		t.Fatalf("expected %d docs, got %d", len(docs), len(got))
+	}
+
+	// Map for convenient lookup.
+	gotDocMap := make(map[string]*Document, len(got))
+	for _, d := range got {
+		gotDocMap[d.ID] = d
+	}
+
+	for _, want := range docs {
+		got, ok := gotDocMap[want.ID]
+		if !ok {
+			t.Fatalf("doc %q not found", want.ID)
+		}
+		if got.Content != want.Content {
+			t.Fatalf("doc %q: expected content %q, got %q", want.ID, want.Content, got.Content)
+		}
+		if !slices.Equal(got.Embedding, vectors) {
+			t.Fatalf("doc %q: embeddings differ, expected %v got %v", want.ID, vectors, got.Embedding)
+		}
+		for k, v := range want.Metadata {
+			if got.Metadata[k] != v {
+				t.Fatalf("doc %q: expected metadata %q=%q, got %q", want.ID, k, v, got.Metadata[k])
+			}
+		}
+	}
+
+	// Mutate returned document and ensure the collection's document is untouched.
+	gotDocMap["1"].Metadata["foo"] = "mutated"
+	orig, err := c.GetByID(ctx, "1")
+	if err != nil {
+		t.Fatalf("unexpected error getting document by ID: %v", err)
+	}
+	if orig.Metadata["foo"] != "bar" {
+		t.Fatalf("mutation leaked into collection: expected \"bar\", got %q", orig.Metadata["foo"])
+	}
+}
+
+// TestCollection_ListDocumentsPartial verifies that ListDocumentsPartial returns
+// all documents and that the returned documents can be mutated without affecting
+// the collection’s internal state.
+func TestCollection_ListDocumentsPartial(t *testing.T) {
+	ctx := context.Background()
+
+	// Create collection
+	db := NewDB()
+	name := "test"
+	metadata := map[string]string{"foo": "bar"}
+	vectors := []float32{-0.40824828, 0.40824828, 0.81649655} // normalized version of `{-0.1, 0.1, 0.2}`
+	embeddingFunc := func(_ context.Context, _ string) ([]float32, error) {
+		return vectors, nil
+	}
+	c, err := db.CreateCollection(name, metadata, embeddingFunc)
+	if err != nil {
+		t.Fatal("expected no error, got", err)
+	}
+	if c == nil {
+		t.Fatal("expected collection, got nil")
+	}
+
+	// Add two documents (one with explicit embedding, one relying on embeddingFunc).
+	docs := []Document{
+		{ID: "1", Metadata: map[string]string{"foo": "bar"}, Embedding: vectors, Content: "hello"},
+		{ID: "2", Metadata: map[string]string{"baz": "qux"}, Content: "world"},
+	}
+	for _, d := range docs {
+		if err := c.AddDocument(ctx, d); err != nil {
+			t.Fatalf("unexpected error adding document %q: %v", d.ID, err)
+		}
+	}
+
+	got, err := c.ListDocumentsPartial(ctx)
+	if err != nil {
+		t.Fatalf("unexpected error from ListDocumentsPartial: %v", err)
+	}
+	if len(got) != len(docs) {
+		t.Fatalf("expected %d docs, got %d", len(docs), len(got))
+	}
+	for _, d := range got {
+		if d.Metadata != nil {
+			t.Fatalf("expected Metadata to be nil, got %#v", d.Metadata)
+		}
+		if d.Embedding != nil {
+			t.Fatalf("expected Embedding to be nil, got %#v", d.Embedding)
+		}
+		// Content and ID must still be present.
+		if d.Content == "" || d.ID == "" {
+			t.Fatalf("expected ID and Content to be set, got %+v", d)
+		}
+	}
+
+	// Map for convenient lookup.
+	gotDocMap := make(map[string]*Document, len(got))
+	for _, d := range got {
+		gotDocMap[d.ID] = d
+	}
+
+	// Mutate deep copy and ensure collection is untouched.
+	gotDocMap["1"].Content = "mutated"
+	orig, _ := c.GetByID(ctx, "1")
+	if orig.Content != "hello" {
+		t.Fatalf("mutation leaked into collection: expected \"hello\", got %q", orig.Content)
+	}
+}
+
+func TestCollection_GetByID(t *testing.T) {
 	ctx := context.Background()
 
 	// Create collection
@@ -492,6 +635,49 @@ func TestCollection_Get(t *testing.T) {
 	_, err = c.GetByID(ctx, "3")
 	if err == nil {
 		t.Fatal("expected error, got nil")
+	}
+}
+
+func TestCollection_GetByMetadata(t *testing.T) {
+	ctx := context.Background()
+
+	// Create collection
+	db := NewDB()
+	name := "test"
+	metadata := map[string]string{"foo": "bar"}
+	embeddingFunc := func(_ context.Context, _ string) ([]float32, error) {
+		return []float32{1.0, 2.0, 3.0}, nil
+	}
+	c, err := db.CreateCollection(name, metadata, embeddingFunc)
+	if err != nil {
+		t.Fatal("expected no error, got", err)
+	}
+
+	// Add documents
+	docs := []Document{
+		{ID: "1", Metadata: map[string]string{"type": "article", "lang": "en"}, Content: "Hello World"},
+		{ID: "2", Metadata: map[string]string{"type": "article", "lang": "fr"}, Content: "Bonjour le monde"},
+		{ID: "3", Metadata: map[string]string{"type": "blog", "lang": "en"}, Content: "My blog post"},
+	}
+	for _, doc := range docs {
+		err := c.AddDocument(ctx, doc)
+		if err != nil {
+			t.Fatal("expected no error, got", err)
+		}
+	}
+
+	// Filter by metadata
+	where := map[string]string{"type": "article", "lang": "en"}
+	results, err := c.GetByMetadata(ctx, where)
+	if err != nil {
+		t.Fatal("expected no error, got", err)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].ID != "1" {
+		t.Fatalf("expected document ID '1', got '%s'", results[0].ID)
 	}
 }
 
@@ -614,6 +800,77 @@ func TestCollection_Delete(t *testing.T) {
 	checkCount(0)
 }
 
+// TestCloneDocument verifies that cloneDocument creates a deep copy of the Document.
+func TestCloneDocument(t *testing.T) {
+	orig := &Document{
+		ID:        "doc1",
+		Metadata:  map[string]string{"foo": "bar"},
+		Embedding: []float32{1.0, 2.0, 3.0},
+		Content:   "hello",
+	}
+	clone := cloneDocument(orig)
+
+	// Check values are equal
+	if clone.ID != orig.ID {
+		t.Fatalf("expected ID %q, got %q", orig.ID, clone.ID)
+	}
+	if clone.Content != orig.Content {
+		t.Fatalf("expected Content %q, got %q", orig.Content, clone.Content)
+	}
+	if !slices.Equal(clone.Embedding, orig.Embedding) {
+		t.Fatalf("expected Embedding %v, got %v", orig.Embedding, clone.Embedding)
+	}
+	for k, v := range orig.Metadata {
+		if clone.Metadata[k] != v {
+			t.Fatalf("expected Metadata[%q]=%q, got %q", k, v, clone.Metadata[k])
+		}
+	}
+
+	// Mutate clone and ensure original is not affected
+	clone.ID = "doc1_clone"
+	clone.Metadata["foo"] = "baz"
+	clone.Embedding[0] = 42.0
+	clone.Content = "changed"
+	if orig.ID != "doc1" {
+		t.Fatalf("mutation leaked into original ID: expected \"doc1\", got %q", orig.ID)
+	}
+	if orig.Metadata["foo"] != "bar" {
+		t.Fatalf("mutation leaked into original Metadata: expected \"bar\", got %q", orig.Metadata["foo"])
+	}
+	if orig.Embedding[0] != 1.0 {
+		t.Fatalf("mutation leaked into original Embedding: expected 1.0, got %v", orig.Embedding[0])
+	}
+	if orig.Content != "hello" {
+		t.Fatalf("mutation leaked into original Content: expected \"hello\", got %q", orig.Content)
+	}
+}
+
+// TestMakePartialDocument verifies that makePartialDocument creates a copy with nil Metadata and Embedding.
+func TestMakePartialDocument(t *testing.T) {
+	orig := &Document{
+		ID:        "doc2",
+		Metadata:  map[string]string{"foo": "bar"},
+		Embedding: []float32{1.0, 2.0, 3.0},
+		Content:   "world",
+	}
+	clone := makePartialDocument(orig)
+
+	// Check ID and Content are copied
+	if clone.ID != orig.ID {
+		t.Fatalf("expected ID %q, got %q", orig.ID, clone.ID)
+	}
+	if clone.Content != orig.Content {
+		t.Fatalf("expected Content %q, got %q", orig.Content, clone.Content)
+	}
+	// Metadata and Embedding must be nil
+	if clone.Metadata != nil {
+		t.Fatalf("expected Metadata to be nil, got %#v", clone.Metadata)
+	}
+	if clone.Embedding != nil {
+		t.Fatalf("expected Embedding to be nil, got %#v", clone.Embedding)
+	}
+}
+
 // Global var for assignment in the benchmark to avoid compiler optimizations.
 var globalRes []Result
 
@@ -725,6 +982,84 @@ func benchmarkCollection_Query(b *testing.B, n int, withContent bool) {
 		b.Fatal("expected nil, got", err)
 	}
 	globalRes = res
+}
+
+var globalDoc *Document
+
+// BenchmarkCloneDocument_1 performs 1 clone per iteration.
+func BenchmarkCloneDocument_1(b *testing.B) {
+	benchmarkCloneDocumentN(b, 1)
+}
+
+// BenchmarkCloneDocument_10 performs 10 clones per iteration.
+func BenchmarkCloneDocument_10(b *testing.B) {
+	benchmarkCloneDocumentN(b, 10)
+}
+
+// BenchmarkCloneDocument_100 performs 100 clones per iteration.
+func BenchmarkCloneDocument_100(b *testing.B) {
+	benchmarkCloneDocumentN(b, 100)
+}
+
+// BenchmarkCloneDocument_1000 performs 1000 clones per iteration.
+func BenchmarkCloneDocument_1000(b *testing.B) {
+	benchmarkCloneDocumentN(b, 1000)
+}
+
+// BenchmarkMakePartialDocument_1 performs 1 shallow clone per iteration.
+func BenchmarkMakePartialDocument_1(b *testing.B) {
+	benchmarkMakePartialDocumentN(b, 1)
+}
+
+// BenchmarkMakePartialDocument_10 performs 10 shallow clones per iteration.
+func BenchmarkMakePartialDocument_10(b *testing.B) {
+	benchmarkMakePartialDocumentN(b, 10)
+}
+
+// BenchmarkMakePartialDocument_100 performs 100 shallow clones per iteration.
+func BenchmarkMakePartialDocument_100(b *testing.B) {
+	benchmarkMakePartialDocumentN(b, 100)
+}
+
+// BenchmarkMakePartialDocument_1000 performs 1000 shallow clones per iteration.
+func BenchmarkMakePartialDocument_1000(b *testing.B) {
+	benchmarkMakePartialDocumentN(b, 1000)
+}
+
+// Helper for benchmarking cloneDocument with n clones per iteration.
+func benchmarkCloneDocumentN(b *testing.B, n int) {
+	doc := &Document{
+		ID:        "bench",
+		Metadata:  map[string]string{"foo": "bar", "baz": "qux"},
+		Embedding: []float32{1.0, 2.0, 3.0},
+		Content:   "benchmark content",
+	}
+	var res *Document
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < n; j++ {
+			res = cloneDocument(doc)
+		}
+	}
+	globalDoc = res // prevent compiler optimization
+}
+
+// Helper for benchmarking makePartialDocument with n clones per iteration.
+func benchmarkMakePartialDocumentN(b *testing.B, n int) {
+	doc := &Document{
+		ID:        "bench",
+		Metadata:  map[string]string{"foo": "bar", "baz": "qux"},
+		Embedding: []float32{1.0, 2.0, 3.0},
+		Content:   "benchmark content",
+	}
+	var res *Document
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		for j := 0; j < n; j++ {
+			res = makePartialDocument(doc)
+		}
+	}
+	globalDoc = res // prevent compiler optimization
 }
 
 // randomString returns a random string of length n using lowercase letters and space.
