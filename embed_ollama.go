@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"sync"
 )
 
@@ -47,8 +48,11 @@ func NewEmbeddingFuncOllama(model string, baseURLOllama string) EmbeddingFunc {
 			return nil, fmt.Errorf("couldn't marshal request body: %w", err)
 		}
 
+		//fmt.Println("Using url: \n", baseURLOllama+"/embed")
+
 		// Create the request. Creating it with context is important for a timeout
 		// to be possible, because the client is configured without a timeout.
+		// req, err := http.NewRequestWithContext(ctx, "POST", baseURLOllama+"/embed", bytes.NewBuffer(reqBody))
 		req, err := http.NewRequestWithContext(ctx, "POST", baseURLOllama+"/embed", bytes.NewBuffer(reqBody))
 		if err != nil {
 			return nil, fmt.Errorf("couldn't create request: %w", err)
@@ -62,34 +66,33 @@ func NewEmbeddingFuncOllama(model string, baseURLOllama string) EmbeddingFunc {
 		}
 		defer resp.Body.Close()
 
-		// Check the response status.
-		if resp.StatusCode != http.StatusOK {
-			return nil, errors.New("error response from the embedding API: " + resp.Status)
-		}
+		//Check the response status.
+		//if resp.StatusCode != http.StatusOK {
+		//	return nil, errors.New("Error response from the embedding API: " + resp.Status)
+		//}
+		//fmt.Println("Status is :", resp.Status)
+		//fmt.Println("Headers are :", resp.Header)
 
-		// Read and decode the response body.
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, fmt.Errorf("couldn't read response body: %w", err)
-		}
-		var embeddingResponse ollamaResponse
-                // convert the body to bytes 
 		bodyBytes, err := io.ReadAll(resp.Body)
-    		if err != nil {
-        	   panic(err)
- 		}
+		if err != nil {
+		       panic(err)
+		}
 
-		// convert bytes to string
-		sb = string(bodyBytes);
+		// Convert to string and print
+		// fmt.Println("Body:", string(bodyBytes))
+		// Read and decode the response body.
+		// body, err := io.ReadAll(resp.Body)
+		// if err != nil {
+		// 	return nil, fmt.Errorf("couldn't read response body: %w", err)
+		// }
 
-		// clean up whitespace that breaks Unmarshal
+		var embeddingResponse ollamaResponse
+		var sb = string(bodyBytes)
 		sb = strings.TrimSpace(sb)
 		bytes := []byte(sb)
-
-		// unmarshall the cleaned up bytes
-                err = json.Unmarshal(bytes, &embeddingResponse)
+		err = json.Unmarshal(bytes, &embeddingResponse)
 		if err != nil {
-			return nil, fmt.Errorf("couldn't unmarshal response body: %w", err)
+			return nil, fmt.Errorf("couldn't unmarshal response body: %w, %s", err, bodyBytes)
 		}
 
 		// Check if the response contains embeddings.
