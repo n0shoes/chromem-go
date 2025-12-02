@@ -2,12 +2,10 @@ package chromem
 
 //	"errors"
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"os/exec"
 	"strings"
 	"sync"
 	"time"
@@ -28,16 +26,6 @@ type ollamaResponse struct {
 func NewEmbeddingFuncOllama(model string, baseURLOllama string) EmbeddingFunc {
 	if baseURLOllama == "" {
 		baseURLOllama = defaultBaseURLOllama
-	}
-
-	// We don't set a default timeout here, although it's usually a good idea.
-	// In our case though, the library user can set the timeout on the context,
-	// and it might have to be a long timeout, depending on the text length.
-	// Disable connection reuse to avoid EOF errors with Ollama's internal services
-	client := &http.Client{
-		Transport: &http.Transport{
-			DisableKeepAlives: true, // Force new connection each time
-		},
 	}
 
 	var checkedNormalized bool
@@ -66,50 +54,30 @@ func NewEmbeddingFuncOllama(model string, baseURLOllama string) EmbeddingFunc {
 
 			url := baseURLOllama + "/embed"
 			if attempt == 0 {
-				fmt.Printf("[DEBUG] Ollama embedding request - URL: %s, text length: %d bytes\n", url, len(text))
+				fmt.Printf("[DEBUG] Ollama embedding request via curl - URL: %s, text length: %d bytes\n", url, len(text))
 			}
 
-			// Create the request. Creating it with context is important for a timeout
-			// to be possible, because the client is configured without a timeout.
-			req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(reqBody))
-			if err != nil {
-				return nil, fmt.Errorf("couldn't create request: %w", err)
-			}
-			req.Header.Set("Content-Type", "application/json")
+			// Use curl instead of Go HTTP client - it's proven reliable with Ollama
+			cmd := exec.CommandContext(ctx, "curl", "-s", "-X", "POST", url,
+				"-H", "Content-Type: application/json",
+				"-d", string(reqBody))
 
-			// Send the request
-			resp, err := client.Do(req)
+			output, err := cmd.CombinedOutput()
 			if err != nil {
-				lastErr = fmt.Errorf("couldn't send request: %w", err)
-				continue // Retry
-			}
-
-			// Read response body
-			bodyBytes, err := io.ReadAll(resp.Body)
-			resp.Body.Close() // Close immediately after reading
-
-			if err != nil {
-				lastErr = fmt.Errorf("couldn't read response body: %w", err)
+				lastErr = fmt.Errorf("curl command failed: %w, output: %s", err, string(output))
 				continue // Retry
 			}
 
 			if attempt == 0 {
-				fmt.Printf("[DEBUG] Ollama response - Status: %d, body length: %d bytes\n", resp.StatusCode, len(bodyBytes))
-			}
-
-			// Check the response status
-			if resp.StatusCode != http.StatusOK {
-				lastErr = fmt.Errorf("error response from Ollama API: %s (status %d), body: %s",
-					resp.Status, resp.StatusCode, string(bodyBytes))
-				continue // Retry
+				fmt.Printf("[DEBUG] Ollama response via curl - body length: %d bytes\n", len(output))
 			}
 
 			// Parse JSON response
 			var embeddingResponse ollamaResponse
-			outputStr := strings.TrimSpace(string(bodyBytes))
+			outputStr := strings.TrimSpace(string(output))
 			err = json.Unmarshal([]byte(outputStr), &embeddingResponse)
 			if err != nil {
-				lastErr = fmt.Errorf("couldn't unmarshal response body: %w, response: %s", err, outputStr)
+				lastErr = fmt.Errorf("couldn't unmarshal response: %w, response: %s", err, outputStr)
 				continue // Retry
 			}
 
